@@ -1,28 +1,47 @@
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { CartItem, Product, User } from '../types';
+import type { CartItem, Category, Customer, Discount, Product, Sale, SalePayment, Shift, User } from '../types';
 
-type PaymentMethod = 'cash' | 'card' | 'transfer';
+type PaymentMethod = 'cash' | 'card' | 'transfer' | 'split';
 
 interface PosPageProps {
   user: User;
   products: Product[];
+  categories: Category[];
+  customers: Customer[];
+  shift: Shift | null;
   busy: boolean;
   error: string | null;
   notice: string | null;
   onLogout: () => Promise<void>;
   onRefreshProducts: () => Promise<void>;
-  onCheckout: (input: { payment_method: PaymentMethod; items: CartItem[] }) => Promise<void>;
+  onCheckout: (input: {
+    payment_method: PaymentMethod;
+    items: CartItem[];
+    customer_id?: number;
+    discount_id?: number;
+    shift_id?: number;
+    payments?: SalePayment[];
+  }) => Promise<Sale | void>;
   onNavigate: (page: 'pos' | 'admin') => void;
+  onOpenShift: (openingCash: number) => Promise<void>;
+  onCloseShift: (shiftId: number, closingCash: number, notes: string) => Promise<void>;
+  onValidatePromo: (code: string) => Promise<Discount | null>;
+  onFindCustomerByPhone: (phone: string) => Promise<Customer | null>;
+  onCreateCustomer: (input: { name: string; phone?: string }) => Promise<void>;
+  onFindByBarcode: (barcode: string) => Promise<Product | null>;
 }
 
 function centsToDisplay(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  return '$' + (cents / 100).toFixed(2);
 }
 
 export function PosPage({
   user,
   products,
+  categories,
+  customers: _customers,
+  shift,
   busy,
   error,
   notice,
@@ -30,258 +49,485 @@ export function PosPage({
   onRefreshProducts,
   onCheckout,
   onNavigate,
+  onOpenShift,
+  onCloseShift,
+  onValidatePromo,
+  onFindCustomerByPhone,
+  onCreateCustomer,
+  onFindByBarcode,
 }: PosPageProps) {
+  const [cart, setCart] = useState<CartItem[]>([]);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
-  const [cart, setCart] = useState<Record<number, number>>({});
-  const [search, setSearch] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<number>(0);
+
+  // Customer
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [showNewCustomer, setShowNewCustomer] = useState(false);
+  const [newCustName, setNewCustName] = useState('');
+
+  // Discount
+  const [promoCode, setPromoCode] = useState('');
+  const [appliedDiscount, setAppliedDiscount] = useState<Discount | null>(null);
+
+  // Split Payment
+  const [splitPayments, setSplitPayments] = useState<SalePayment[]>([]);
+  const [splitMethod, setSplitMethod] = useState<'cash' | 'card' | 'transfer'>('cash');
+  const [splitAmount, setSplitAmount] = useState('');
+
+  // Cash change
+  const [cashReceived, setCashReceived] = useState('');
+
+  // Receipt
+  const [lastSale, setLastSale] = useState<Sale | null>(null);
+  const [showReceipt, setShowReceipt] = useState(false);
+
+  // Shift
+  const [showShiftOpen, setShowShiftOpen] = useState(false);
+  const [shiftOpenCash, setShiftOpenCash] = useState('');
+  const [showShiftClose, setShowShiftClose] = useState(false);
+  const [shiftCloseCash, setShiftCloseCash] = useState('');
+  const [shiftCloseNotes, setShiftCloseNotes] = useState('');
+
+  // Barcode
+  const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const [barcodeValue, setBarcodeValue] = useState('');
 
   const filteredProducts = useMemo(() => {
-    if (!search.trim()) return products;
-    const q = search.toLowerCase();
-    return products.filter(
-      p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)
-    );
-  }, [products, search]);
+    let filtered = products;
+    if (selectedCategory > 0) {
+      filtered = filtered.filter(p => p.category_id === selectedCategory);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+    }
+    return filtered;
+  }, [products, selectedCategory, searchQuery]);
 
   const cartDetails = useMemo(() => {
-    return Object.entries(cart)
-      .map(([idText, quantity]) => {
-        const productId = Number(idText);
-        const product = products.find(p => p.id === productId);
-        if (!product || quantity <= 0) return null;
-        return { product, quantity, lineTotal: quantity * product.price_cents };
-      })
-      .filter((e): e is { product: Product; quantity: number; lineTotal: number } => e !== null);
+    return cart.map(ci => {
+      const product = products.find(p => p.id === ci.product_id);
+      if (!product) return null;
+      const lineSubtotal = product.price_cents * ci.quantity;
+      const lineTax = Math.round(lineSubtotal * product.tax_rate_percent / 100);
+      return { ...ci, product, lineSubtotal, lineTax, lineTotal: lineSubtotal + lineTax };
+    }).filter(Boolean) as { product_id: number; quantity: number; product: Product; lineSubtotal: number; lineTax: number; lineTotal: number }[];
   }, [cart, products]);
 
-  const cartTotalCents = useMemo(
-    () => cartDetails.reduce((t, e) => t + e.lineTotal, 0),
-    [cartDetails],
-  );
+  const subtotal = cartDetails.reduce((s, c) => s + c.lineSubtotal, 0);
+  const totalTax = cartDetails.reduce((s, c) => s + c.lineTax, 0);
 
-  const cartItemCount = useMemo(
-    () => cartDetails.reduce((t, e) => t + e.quantity, 0),
-    [cartDetails],
-  );
+  const discountAmount = useMemo(() => {
+    if (!appliedDiscount) return 0;
+    if (appliedDiscount.min_order_cents > subtotal) return 0;
+    if (appliedDiscount.type === 'percent') return Math.round(subtotal * appliedDiscount.value / 100);
+    return Math.min(appliedDiscount.value, subtotal + totalTax);
+  }, [appliedDiscount, subtotal, totalTax]);
+
+  const grandTotal = subtotal + totalTax - discountAmount;
+
+  const splitTotal = splitPayments.reduce((s, p) => s + p.amount_cents, 0);
+  const splitRemaining = grandTotal - splitTotal;
+
+  const cashReceivedCents = Math.round(parseFloat(cashReceived || '0') * 100);
+  const changeDue = paymentMethod === 'cash' ? Math.max(0, cashReceivedCents - grandTotal) : 0;
+
+  // Focus barcode input on mount
+  useEffect(() => { barcodeInputRef.current?.focus(); }, []);
 
   function addToCart(product: Product) {
-    if (product.stock_quantity <= 0) return;
-    setCart(c => {
-      const existing = c[product.id] ?? 0;
-      if (existing >= product.stock_quantity) return c;
-      return { ...c, [product.id]: existing + 1 };
+    setCart(prev => {
+      const existing = prev.find(c => c.product_id === product.id);
+      if (existing) {
+        if (existing.quantity >= product.stock_quantity) return prev;
+        return prev.map(c => c.product_id === product.id ? { ...c, quantity: c.quantity + 1 } : c);
+      }
+      if (product.stock_quantity <= 0) return prev;
+      return [...prev, { product_id: product.id, quantity: 1 }];
     });
   }
 
   function removeFromCart(productId: number) {
-    setCart(c => {
-      const next = { ...c };
-      delete next[productId];
-      return next;
-    });
+    setCart(prev => prev.filter(c => c.product_id !== productId));
   }
 
   function decrementInCart(productId: number) {
-    setCart(c => {
-      const existing = c[productId] ?? 0;
-      if (existing <= 1) {
-        const next = { ...c };
-        delete next[productId];
-        return next;
-      }
-      return { ...c, [productId]: existing - 1 };
+    setCart(prev => {
+      const existing = prev.find(c => c.product_id === productId);
+      if (!existing) return prev;
+      if (existing.quantity <= 1) return prev.filter(c => c.product_id !== productId);
+      return prev.map(c => c.product_id === productId ? { ...c, quantity: c.quantity - 1 } : c);
     });
   }
 
   function incrementInCart(product: Product) {
-    setCart(c => {
-      const existing = c[product.id] ?? 0;
-      if (existing >= product.stock_quantity) return c;
-      return { ...c, [product.id]: existing + 1 };
+    setCart(prev => {
+      const existing = prev.find(c => c.product_id === product.id);
+      if (!existing || existing.quantity >= product.stock_quantity) return prev;
+      return prev.map(c => c.product_id === product.id ? { ...c, quantity: c.quantity + 1 } : c);
     });
   }
 
-  function clearCart() {
-    setCart({});
+  function clearCart() { setCart([]); setAppliedDiscount(null); setPromoCode(''); setSelectedCustomer(null); setCustomerPhone(''); setSplitPayments([]); setCashReceived(''); }
+
+  async function handleBarcodeScan(e: FormEvent) {
+    e.preventDefault();
+    if (!barcodeValue.trim()) return;
+    const product = await onFindByBarcode(barcodeValue.trim());
+    if (product) addToCart(product);
+    setBarcodeValue('');
+    barcodeInputRef.current?.focus();
+  }
+
+  async function handleCustomerLookup() {
+    if (!customerPhone.trim()) return;
+    const cust = await onFindCustomerByPhone(customerPhone.trim());
+    if (cust) {
+      setSelectedCustomer(cust);
+      setShowNewCustomer(false);
+    } else {
+      setShowNewCustomer(true);
+    }
+  }
+
+  async function handleCreateNewCustomer(e: FormEvent) {
+    e.preventDefault();
+    await onCreateCustomer({ name: newCustName, phone: customerPhone });
+    const cust = await onFindCustomerByPhone(customerPhone);
+    if (cust) setSelectedCustomer(cust);
+    setNewCustName('');
+    setShowNewCustomer(false);
+  }
+
+  async function handleApplyPromo() {
+    if (!promoCode.trim()) return;
+    const disc = await onValidatePromo(promoCode.trim());
+    setAppliedDiscount(disc);
+  }
+
+  function addSplitPayment() {
+    const amount = Math.round(parseFloat(splitAmount || '0') * 100);
+    if (amount <= 0 || amount > splitRemaining) return;
+    setSplitPayments(prev => [...prev, { method: splitMethod, amount_cents: amount }]);
+    setSplitAmount('');
   }
 
   async function submitCheckout(e: FormEvent) {
     e.preventDefault();
-    if (cartDetails.length === 0) return;
-    const items: CartItem[] = cartDetails.map(entry => ({
-      product_id: entry.product.id,
-      quantity: entry.quantity,
-    }));
-    await onCheckout({ payment_method: paymentMethod, items });
-    setCart({});
+    if (cart.length === 0) return;
+    if (paymentMethod === 'split' && splitRemaining > 0) return;
+    if (paymentMethod === 'cash' && cashReceivedCents < grandTotal) return;
+
+    const result = await onCheckout({
+      payment_method: paymentMethod,
+      items: cart,
+      customer_id: selectedCustomer?.id,
+      discount_id: appliedDiscount?.id,
+      shift_id: shift?.id,
+      payments: paymentMethod === 'split' ? splitPayments : undefined,
+    });
+    if (result) {
+      setLastSale(result);
+      setShowReceipt(true);
+    }
+    setCart([]);
+    setAppliedDiscount(null);
+    setPromoCode('');
+    setSelectedCustomer(null);
+    setCustomerPhone('');
+    setSplitPayments([]);
+    setCashReceived('');
+  }
+
+  async function handleOpenShift(e: FormEvent) {
+    e.preventDefault();
+    const cents = Math.round(parseFloat(shiftOpenCash || '0') * 100);
+    await onOpenShift(cents);
+    setShowShiftOpen(false);
+    setShiftOpenCash('');
+  }
+
+  async function handleCloseShift(e: FormEvent) {
+    e.preventDefault();
+    if (!shift) return;
+    const cents = Math.round(parseFloat(shiftCloseCash || '0') * 100);
+    await onCloseShift(shift.id, cents, shiftCloseNotes);
+    setShowShiftClose(false);
+    setShiftCloseCash('');
+    setShiftCloseNotes('');
   }
 
   return (
-    <div className="pos-shell">
-      {/* Left: product area */}
-      <div className="pos-products-area">
-        {/* Top bar */}
-        <header className="pos-header">
-          <div className="pos-header-left">
-            <div className="pos-brand">
-              <div className="brand-icon">POS</div>
-              <div>
-                <h1>Point of Sale</h1>
-                <span className="pos-operator">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                  {user.username} &middot; {user.role}
-                </span>
-              </div>
-            </div>
-          </div>
-          <div className="pos-header-right">
-            {user.role === 'admin' && (
-              <button className="btn btn-ghost" onClick={() => onNavigate('admin')}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                Admin
-              </button>
-            )}
-            <button className="btn btn-ghost" onClick={onRefreshProducts} disabled={busy}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-            </button>
-            <button className="btn btn-ghost-danger" onClick={onLogout} disabled={busy}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-            </button>
-          </div>
-        </header>
+    <div className="pos-layout">
+      {/* Header */}
+      <header className="pos-header">
+        <div className="header-left">
+          <div className="brand-icon">POS</div>
+          <span className="header-title">Point of Sale</span>
+          {shift && <span className="shift-badge">Shift #{shift.id}</span>}
+        </div>
+        <div className="header-right">
+          <span className="user-label">{user.username} ({user.role})</span>
+          {user.role === 'admin' && <button className="btn btn-ghost" onClick={() => onNavigate('admin')}>Admin</button>}
+          {!shift ? (
+            <button className="btn btn-outline" onClick={() => setShowShiftOpen(true)}>Open Shift</button>
+          ) : (
+            <button className="btn btn-outline" onClick={() => setShowShiftClose(true)}>Close Shift</button>
+          )}
+          <button className="btn btn-ghost" onClick={onLogout}>Logout</button>
+        </div>
+      </header>
 
-        {/* Alerts */}
-        {error && <div className="pos-alert pos-alert-error">{error}</div>}
-        {notice && <div className="pos-alert pos-alert-success">{notice}</div>}
+      {/* Notifications */}
+      {error && <div className="alert alert-error">{error}</div>}
+      {notice && <div className="alert alert-success">{notice}</div>}
 
-        {/* Search bar */}
-        <div className="pos-search">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input
-            type="text"
-            placeholder="Search products by name or SKU..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
+      <div className="pos-body">
+        {/* Product Panel */}
+        <div className="pos-products-panel">
+          {/* Search + Barcode */}
+          <div className="pos-search-row">
+            <input type="text" className="search-input" placeholder="Search products..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+            <form className="barcode-form" onSubmit={handleBarcodeScan}>
+              <input ref={barcodeInputRef} type="text" className="barcode-input" placeholder="Scan barcode..." value={barcodeValue} onChange={e => setBarcodeValue(e.target.value)} />
+              <button type="submit" className="btn btn-sm">Scan</button>
+            </form>
+            <button className="btn btn-ghost btn-sm" onClick={onRefreshProducts}>↻</button>
+          </div>
+
+          {/* Category Tabs */}
+          <div className="category-tabs">
+            <button className={`category-tab ${selectedCategory === 0 ? 'active' : ''}`} onClick={() => setSelectedCategory(0)}>All</button>
+            {categories.map(cat => (
+              <button key={cat.id} className={`category-tab ${selectedCategory === cat.id ? 'active' : ''}`} style={{ '--cat-color': cat.color } as React.CSSProperties} onClick={() => setSelectedCategory(cat.id)}>{cat.name}</button>
+            ))}
+          </div>
+
+          {/* Product Grid */}
+          <div className="pos-product-grid">
+            {filteredProducts.map(product => {
+              const inCart = cart.find(c => c.product_id === product.id);
+              return (
+                <button key={product.id} className={`product-card ${product.stock_quantity <= 0 ? 'out-of-stock' : ''} ${inCart ? 'in-cart' : ''}`} onClick={() => addToCart(product)} disabled={product.stock_quantity <= 0}>
+                  {product.image_url ? (
+                    <img src={product.image_url} alt={product.name} className="product-card-img" />
+                  ) : (
+                    <div className="product-card-placeholder">{product.name.charAt(0)}</div>
+                  )}
+                  <div className="product-card-info">
+                    <span className="product-card-name">{product.name}</span>
+                    <span className="product-card-price">{centsToDisplay(product.price_cents)}</span>
+                    <span className="product-card-stock">Stock: {product.stock_quantity}</span>
+                    {product.tax_rate_percent > 0 && <span className="product-card-tax">+{product.tax_rate_percent}% tax</span>}
+                  </div>
+                  {inCart && <span className="product-card-badge">{inCart.quantity}</span>}
+                </button>
+              );
+            })}
+            {filteredProducts.length === 0 && <p className="empty-state">No products found.</p>}
+          </div>
         </div>
 
-        {/* Product grid */}
-        <div className="pos-product-grid">
-          {filteredProducts.map(product => (
-            <button
-              key={product.id}
-              className={`pos-product-card ${product.stock_quantity <= 0 ? 'out-of-stock' : ''}`}
-              onClick={() => addToCart(product)}
-              disabled={busy || product.stock_quantity <= 0}
-              type="button"
-            >
-              <div className="pos-product-img">
-                {product.image_url ? (
-                  <img src={product.image_url} alt={product.name} />
+        {/* Cart Panel */}
+        <div className="pos-cart-panel">
+          <h2 className="cart-title">Cart ({cart.reduce((s, c) => s + c.quantity, 0)} items)</h2>
+
+          <div className="cart-items">
+            {cartDetails.map(item => (
+              <div key={item.product_id} className="cart-item">
+                <div className="cart-item-info">
+                  <span className="cart-item-name">{item.product.name}</span>
+                  <span className="cart-item-price">{centsToDisplay(item.product.price_cents)} × {item.quantity}</span>
+                </div>
+                <div className="cart-item-actions">
+                  <button className="btn btn-xs" onClick={() => decrementInCart(item.product_id)}>−</button>
+                  <span className="cart-item-qty">{item.quantity}</span>
+                  <button className="btn btn-xs" onClick={() => incrementInCart(item.product)}>+</button>
+                  <button className="btn btn-xs btn-danger" onClick={() => removeFromCart(item.product_id)}>✕</button>
+                </div>
+                <span className="cart-item-total">{centsToDisplay(item.lineTotal)}</span>
+              </div>
+            ))}
+            {cart.length === 0 && <p className="empty-state">Cart is empty</p>}
+          </div>
+
+          {cart.length > 0 && (
+            <>
+              {/* Customer */}
+              <div className="cart-section">
+                <label className="cart-section-label">Customer (optional)</label>
+                {selectedCustomer ? (
+                  <div className="selected-tag">
+                    <span>{selectedCustomer.name} — {selectedCustomer.loyalty_points} pts</span>
+                    <button className="btn btn-xs" onClick={() => { setSelectedCustomer(null); setCustomerPhone(''); }}>✕</button>
+                  </div>
                 ) : (
-                  <div className="pos-product-img-placeholder">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  <div className="inline-form">
+                    <input type="text" placeholder="Phone number" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} />
+                    <button className="btn btn-sm" onClick={handleCustomerLookup}>Find</button>
                   </div>
                 )}
-                {product.stock_quantity <= 0 && (
-                  <div className="pos-product-badge-oos">Out of Stock</div>
-                )}
-                {product.stock_quantity > 0 && product.stock_quantity <= 5 && (
-                  <div className="pos-product-badge-low">Low: {product.stock_quantity}</div>
-                )}
-                {(cart[product.id] ?? 0) > 0 && (
-                  <div className="pos-product-cart-qty">{cart[product.id]}</div>
+                {showNewCustomer && (
+                  <form className="inline-form" onSubmit={handleCreateNewCustomer} style={{ marginTop: 4 }}>
+                    <input type="text" placeholder="Customer name" value={newCustName} onChange={e => setNewCustName(e.target.value)} required />
+                    <button type="submit" className="btn btn-sm btn-primary">Add</button>
+                  </form>
                 )}
               </div>
-              <div className="pos-product-info">
-                <span className="pos-product-name">{product.name}</span>
-                <span className="pos-product-price">{centsToDisplay(product.price_cents)}</span>
+
+              {/* Promo Code */}
+              <div className="cart-section">
+                <label className="cart-section-label">Promo Code</label>
+                {appliedDiscount ? (
+                  <div className="selected-tag discount-tag">
+                    <span>{appliedDiscount.name} ({appliedDiscount.type === 'percent' ? appliedDiscount.value + '%' : centsToDisplay(appliedDiscount.value)} off)</span>
+                    <button className="btn btn-xs" onClick={() => { setAppliedDiscount(null); setPromoCode(''); }}>✕</button>
+                  </div>
+                ) : (
+                  <div className="inline-form">
+                    <input type="text" placeholder="Enter code" value={promoCode} onChange={e => setPromoCode(e.target.value)} />
+                    <button className="btn btn-sm" onClick={handleApplyPromo}>Apply</button>
+                  </div>
+                )}
               </div>
-            </button>
-          ))}
-          {filteredProducts.length === 0 && (
-            <div className="pos-empty">No products found</div>
+
+              {/* Summary */}
+              <div className="cart-summary">
+                <div className="summary-row"><span>Subtotal</span><span>{centsToDisplay(subtotal)}</span></div>
+                {totalTax > 0 && <div className="summary-row"><span>Tax</span><span>+{centsToDisplay(totalTax)}</span></div>}
+                {discountAmount > 0 && <div className="summary-row discount-row"><span>Discount</span><span>−{centsToDisplay(discountAmount)}</span></div>}
+                <div className="summary-row total-row"><span>Total</span><span>{centsToDisplay(grandTotal)}</span></div>
+              </div>
+
+              {/* Payment */}
+              <form className="cart-checkout" onSubmit={submitCheckout}>
+                <div className="payment-methods">
+                  {(['cash', 'card', 'transfer', 'split'] as PaymentMethod[]).map(m => (
+                    <button key={m} type="button" className={`payment-btn ${paymentMethod === m ? 'active' : ''}`} onClick={() => { setPaymentMethod(m); setSplitPayments([]); }}>
+                      {m === 'cash' ? '💵 Cash' : m === 'card' ? '💳 Card' : m === 'transfer' ? '🏛 Transfer' : '🔀 Split'}
+                    </button>
+                  ))}
+                </div>
+
+                {paymentMethod === 'cash' && (
+                  <div className="cash-section">
+                    <label>Cash Received</label>
+                    <input type="number" step="0.01" min="0" placeholder="0.00" value={cashReceived} onChange={e => setCashReceived(e.target.value)} />
+                    {cashReceivedCents > 0 && <div className="change-display">Change: <strong>{centsToDisplay(changeDue)}</strong></div>}
+                  </div>
+                )}
+
+                {paymentMethod === 'split' && (
+                  <div className="split-section">
+                    <div className="split-list">
+                      {splitPayments.map((sp, i) => (
+                        <div key={i} className="split-item">
+                          <span>{sp.method}: {centsToDisplay(sp.amount_cents)}</span>
+                          <button type="button" className="btn btn-xs btn-danger" onClick={() => setSplitPayments(prev => prev.filter((_, idx) => idx !== i))}>✕</button>
+                        </div>
+                      ))}
+                    </div>
+                    {splitRemaining > 0 && (
+                      <div className="split-add">
+                        <select value={splitMethod} onChange={e => setSplitMethod(e.target.value as 'cash' | 'card' | 'transfer')}>
+                          <option value="cash">Cash</option>
+                          <option value="card">Card</option>
+                          <option value="transfer">Transfer</option>
+                        </select>
+                        <input type="number" step="0.01" min="0.01" placeholder="Amount" value={splitAmount} onChange={e => setSplitAmount(e.target.value)} />
+                        <button type="button" className="btn btn-sm" onClick={addSplitPayment}>Add</button>
+                      </div>
+                    )}
+                    <div className="split-remaining">Remaining: <strong>{centsToDisplay(splitRemaining)}</strong></div>
+                  </div>
+                )}
+
+                <div className="checkout-actions">
+                  <button type="button" className="btn btn-outline" onClick={clearCart}>Clear</button>
+                  <button type="submit" className="btn btn-primary btn-lg" disabled={busy || cart.length === 0 || (paymentMethod === 'split' && splitRemaining > 0) || (paymentMethod === 'cash' && cashReceivedCents < grandTotal)}>
+                    Checkout {centsToDisplay(grandTotal)}
+                  </button>
+                </div>
+              </form>
+            </>
           )}
         </div>
       </div>
 
-      {/* Right: cart sidebar */}
-      <aside className="pos-cart-sidebar">
-        <div className="pos-cart-header">
-          <h2>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
-            Cart
-          </h2>
-          <span className="cart-count">{cartItemCount} items</span>
-        </div>
-
-        {/* Cart items */}
-        <div className="pos-cart-items">
-          {cartDetails.length === 0 && (
-            <div className="pos-cart-empty">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
-              <p>Tap a product to add it</p>
-            </div>
-          )}
-          {cartDetails.map(entry => (
-            <div className="pos-cart-item" key={entry.product.id}>
-              <div className="pos-cart-item-info">
-                <span className="pos-cart-item-name">{entry.product.name}</span>
-                <span className="pos-cart-item-unit">{centsToDisplay(entry.product.price_cents)} each</span>
+      {/* Shift Open Modal */}
+      {showShiftOpen && (
+        <div className="modal-overlay" onClick={() => setShowShiftOpen(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h3>Open Shift</h3>
+            <form onSubmit={handleOpenShift}>
+              <div className="form-group">
+                <label>Opening Cash ($)</label>
+                <input type="number" step="0.01" min="0" value={shiftOpenCash} onChange={e => setShiftOpenCash(e.target.value)} autoFocus />
               </div>
-              <div className="pos-cart-item-controls">
-                <button type="button" className="qty-btn" onClick={() => decrementInCart(entry.product.id)} disabled={busy}>-</button>
-                <span className="qty-display">{entry.quantity}</span>
-                <button type="button" className="qty-btn" onClick={() => incrementInCart(entry.product)} disabled={busy || entry.quantity >= entry.product.stock_quantity}>+</button>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-outline" onClick={() => setShowShiftOpen(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary">Open Shift</button>
               </div>
-              <div className="pos-cart-item-total">
-                <span>{centsToDisplay(entry.lineTotal)}</span>
-                <button type="button" className="cart-remove-btn" onClick={() => removeFromCart(entry.product.id)} disabled={busy} title="Remove">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Checkout section */}
-        <form className="pos-checkout" onSubmit={submitCheckout}>
-          {cartDetails.length > 0 && (
-            <button type="button" className="btn btn-ghost btn-small" onClick={clearCart}>Clear Cart</button>
-          )}
-
-          <div className="pos-payment-methods">
-            {(['cash', 'card', 'transfer'] as const).map(method => (
-              <button
-                key={method}
-                type="button"
-                className={`payment-method-btn ${paymentMethod === method ? 'selected' : ''}`}
-                onClick={() => setPaymentMethod(method)}
-              >
-                {method === 'cash' && (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
-                )}
-                {method === 'card' && (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
-                )}
-                {method === 'transfer' && (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-                )}
-                {method.charAt(0).toUpperCase() + method.slice(1)}
-              </button>
-            ))}
+            </form>
           </div>
+        </div>
+      )}
 
-          <div className="pos-total">
-            <span>Total</span>
-            <strong>{centsToDisplay(cartTotalCents)}</strong>
+      {/* Shift Close Modal */}
+      {showShiftClose && shift && (
+        <div className="modal-overlay" onClick={() => setShowShiftClose(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h3>Close Shift #{shift.id}</h3>
+            <p className="modal-info">Opened with: <strong>{centsToDisplay(shift.opening_cash_cents)}</strong></p>
+            <form onSubmit={handleCloseShift}>
+              <div className="form-group">
+                <label>Closing Cash ($)</label>
+                <input type="number" step="0.01" min="0" value={shiftCloseCash} onChange={e => setShiftCloseCash(e.target.value)} autoFocus />
+              </div>
+              <div className="form-group">
+                <label>Notes</label>
+                <textarea value={shiftCloseNotes} onChange={e => setShiftCloseNotes(e.target.value)} rows={2} />
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-outline" onClick={() => setShowShiftClose(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary">Close Shift</button>
+              </div>
+            </form>
           </div>
+        </div>
+      )}
 
-          <button type="submit" className="btn btn-checkout" disabled={busy || cartDetails.length === 0}>
-            {busy ? 'Processing...' : 'Charge ' + centsToDisplay(cartTotalCents)}
-          </button>
-        </form>
-      </aside>
+      {/* Receipt Modal */}
+      {showReceipt && lastSale && (
+        <div className="modal-overlay" onClick={() => setShowReceipt(false)}>
+          <div className="modal receipt-modal" onClick={e => e.stopPropagation()}>
+            <div className="receipt" id="receipt-print">
+              <div className="receipt-header">
+                <h3>POS System</h3>
+                <p>Receipt #{lastSale.receipt_number}</p>
+                <p>{new Date(lastSale.created_at).toLocaleString()}</p>
+              </div>
+              <hr />
+              <div className="receipt-summary">
+                <div className="receipt-row"><span>Subtotal</span><span>{centsToDisplay(lastSale.subtotal_cents)}</span></div>
+                {lastSale.tax_cents > 0 && <div className="receipt-row"><span>Tax</span><span>{centsToDisplay(lastSale.tax_cents)}</span></div>}
+                {lastSale.discount_cents > 0 && <div className="receipt-row"><span>Discount</span><span>-{centsToDisplay(lastSale.discount_cents)}</span></div>}
+                <div className="receipt-row receipt-total"><span>TOTAL</span><span>{centsToDisplay(lastSale.total_cents)}</span></div>
+                <div className="receipt-row"><span>Payment</span><span>{lastSale.payment_method.toUpperCase()}</span></div>
+                {paymentMethod === 'cash' && changeDue > 0 && <div className="receipt-row"><span>Change</span><span>{centsToDisplay(changeDue)}</span></div>}
+              </div>
+              <hr />
+              <p className="receipt-footer">Thank you for your purchase!</p>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-outline" onClick={() => { window.print(); }}>🖨 Print</button>
+              <button className="btn btn-primary" onClick={() => setShowReceipt(false)}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
