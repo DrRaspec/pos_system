@@ -21,6 +21,18 @@ bool RateLimiter::allow(const std::string& key) {
 
   entries.push_back(now);
 
+  // Periodically clean up stale keys to prevent memory growth
+  if (++cleanup_counter_ >= 100) {
+    cleanup_counter_ = 0;
+    for (auto it = requests_.begin(); it != requests_.end(); ) {
+      if (it->second.empty()) {
+        it = requests_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
   return true;
 }
 
