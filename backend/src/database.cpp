@@ -55,6 +55,10 @@ std::unique_ptr<pqxx::connection> openConnection(const std::string& connection_s
                 "UPDATE products SET stock_quantity = $1, updated_at = now() "
                 "WHERE id = $2");
 
+  conn->prepare("update_product",
+                "UPDATE products SET name = $1, price_cents = $2, stock_quantity = $3, updated_at = now() "
+                "WHERE id = $4 AND is_active = TRUE");
+
   conn->prepare("fetch_product_for_update",
                 "SELECT id, price_cents, stock_quantity, is_active, name "
                 "FROM products WHERE id = $1 FOR UPDATE");
@@ -233,6 +237,27 @@ bool Database::updateProductStock(int product_id, int stock_quantity, int actor_
         {"stock_quantity", stock_quantity},
     };
     tx.exec_prepared("insert_audit", actor_user_id, "product.stock_updated", detail.dump());
+  }
+
+  tx.commit();
+  return updated;
+}
+
+bool Database::updateProduct(int product_id, const std::string& name, int price_cents, int stock_quantity, int actor_user_id) const {
+  auto conn = openConnection(connection_string_);
+  pqxx::work tx(*conn);
+
+  const pqxx::result update_result = tx.exec_prepared("update_product", name, price_cents, stock_quantity, product_id);
+  const bool updated = update_result.affected_rows() == 1;
+
+  if (updated) {
+    nlohmann::json detail = {
+        {"product_id", product_id},
+        {"name", name},
+        {"price_cents", price_cents},
+        {"stock_quantity", stock_quantity},
+    };
+    tx.exec_prepared("insert_audit", actor_user_id, "product.updated", detail.dump());
   }
 
   tx.commit();

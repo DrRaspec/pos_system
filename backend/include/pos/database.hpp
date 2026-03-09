@@ -68,6 +68,7 @@ class Database {
                               int stock_quantity,
                               int actor_user_id) const;
   bool updateProductStock(int product_id, int stock_quantity, int actor_user_id) const;
+  bool updateProduct(int product_id, const std::string& name, int price_cents, int stock_quantity, int actor_user_id) const;
 
   SaleRecord createSale(int sold_by_user_id,
                         const std::string& payment_method,

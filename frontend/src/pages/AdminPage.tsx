@@ -11,7 +11,7 @@ interface AdminPageProps {
   notice: string | null;
   onCreateUser: (input: { username: string; password: string; role: 'admin' | 'cashier' }) => Promise<void>;
   onCreateProduct: (input: { sku: string; name: string; price_cents: number; stock_quantity: number }) => Promise<void>;
-  onUpdateStock: (productId: number, stockQuantity: number) => Promise<void>;
+  onUpdateProduct: (productId: number, input: { name: string; price_cents: number; stock_quantity: number }) => Promise<void>;
   onUploadImage: (productId: number, file: File) => Promise<void>;
   onRefreshUsers: () => Promise<void>;
   onRefreshProducts: () => Promise<void>;
@@ -36,7 +36,7 @@ export function AdminPage({
   notice,
   onCreateUser,
   onCreateProduct,
-  onUpdateStock,
+  onUpdateProduct,
   onUploadImage,
   onRefreshUsers,
   onRefreshProducts,
@@ -56,8 +56,10 @@ export function AdminPage({
   const [newPriceCents, setNewPriceCents] = useState('');
   const [newStock, setNewStock] = useState('');
 
-  const [stockProductId, setStockProductId] = useState('');
-  const [stockQuantity, setStockQuantity] = useState('');
+  const [editProductId, setEditProductId] = useState('');
+  const [editName, setEditName] = useState('');
+  const [editPriceCents, setEditPriceCents] = useState('');
+  const [editStock, setEditStock] = useState('');
 
   const [imageProductId, setImageProductId] = useState('');
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -84,11 +86,33 @@ export function AdminPage({
     setNewStock('');
   }
 
-  async function submitStockUpdate(e: FormEvent) {
+  function handleEditProductSelect(id: string) {
+    setEditProductId(id);
+    if (id) {
+      const p = products.find(pr => pr.id === Number(id));
+      if (p) {
+        setEditName(p.name);
+        setEditPriceCents(String(p.price_cents));
+        setEditStock(String(p.stock_quantity));
+      }
+    } else {
+      setEditName('');
+      setEditPriceCents('');
+      setEditStock('');
+    }
+  }
+
+  async function submitEditProduct(e: FormEvent) {
     e.preventDefault();
-    await onUpdateStock(Number(stockProductId), Number(stockQuantity));
-    setStockProductId('');
-    setStockQuantity('');
+    await onUpdateProduct(Number(editProductId), {
+      name: editName.trim(),
+      price_cents: Number(editPriceCents),
+      stock_quantity: Number(editStock),
+    });
+    setEditProductId('');
+    setEditName('');
+    setEditPriceCents('');
+    setEditStock('');
   }
 
   async function submitImageUpload(e: FormEvent) {
@@ -270,27 +294,37 @@ export function AdminPage({
                 </form>
               </div>
 
-              {/* Update stock */}
+              {/* Edit product */}
               <div className="admin-card">
-                <h3>Update Stock</h3>
-                <form className="admin-form" onSubmit={submitStockUpdate}>
+                <h3>Edit Product</h3>
+                <form className="admin-form" onSubmit={submitEditProduct}>
                   <div className="form-group">
-                    <label htmlFor="stock-pid">Product</label>
-                    <select id="stock-pid" required value={stockProductId} onChange={e => setStockProductId(e.target.value)}>
+                    <label htmlFor="edit-pid">Product</label>
+                    <select id="edit-pid" required value={editProductId} onChange={e => handleEditProductSelect(e.target.value)}>
                       <option value="">Select product...</option>
                       {products.map(p => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} (Stock: {p.stock_quantity})
-                        </option>
+                        <option key={p.id} value={p.id}>{p.name}</option>
                       ))}
                     </select>
                   </div>
                   <div className="form-group">
-                    <label htmlFor="stock-qty">New Quantity</label>
-                    <input id="stock-qty" type="number" min={0} required placeholder="0"
-                      value={stockQuantity} onChange={e => setStockQuantity(e.target.value)} />
+                    <label htmlFor="edit-name">Name</label>
+                    <input id="edit-name" type="text" required maxLength={120} placeholder="Product name"
+                      value={editName} onChange={e => setEditName(e.target.value)} />
                   </div>
-                  <button type="submit" className="btn btn-primary" disabled={busy}>Update Stock</button>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label htmlFor="edit-price">Price (cents)</label>
+                      <input id="edit-price" type="number" min={1} required placeholder="500"
+                        value={editPriceCents} onChange={e => setEditPriceCents(e.target.value)} />
+                    </div>
+                    <div className="form-group">
+                      <label htmlFor="edit-stock">Stock</label>
+                      <input id="edit-stock" type="number" min={0} required placeholder="0"
+                        value={editStock} onChange={e => setEditStock(e.target.value)} />
+                    </div>
+                  </div>
+                  <button type="submit" className="btn btn-primary" disabled={busy || !editProductId}>Update Product</button>
                 </form>
               </div>
 

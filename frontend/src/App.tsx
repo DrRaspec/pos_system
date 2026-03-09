@@ -11,7 +11,7 @@ import {
   fetchUsers,
   login,
   logout,
-  updateProductStock,
+  updateProduct,
   uploadProductImage,
 } from './api/client';
 import { LoginPage } from './pages/LoginPage';
@@ -153,11 +153,14 @@ export default function App() {
     });
   }
 
-  async function handleUpdateStock(productId: number, stockQuantity: number) {
+  async function handleUpdateProduct(
+    productId: number,
+    input: { name: string; price_cents: number; stock_quantity: number },
+  ) {
     await runAction(async () => {
-      await updateProductStock(productId, stockQuantity);
+      await updateProduct(productId, input);
       await refreshProducts();
-      setNotice('Stock updated.');
+      setNotice('Product updated.');
     });
   }
 
@@ -217,7 +220,7 @@ export default function App() {
         notice={notice}
         onCreateUser={handleCreateUser}
         onCreateProduct={handleCreateProduct}
-        onUpdateStock={handleUpdateStock}
+        onUpdateProduct={handleUpdateProduct}
         onUploadImage={handleUploadImage}
         onRefreshUsers={handleRefreshUsers}
         onRefreshProducts={handleRefreshProducts}

@@ -349,6 +349,69 @@ int main() {
                    }
                  });
 
+    // --- PATCH /api/products/:id (admin – update name, price, stock) ---
+    server.Patch(R"(/api/products/(\d+))",
+                 [&](const httplib::Request& req, httplib::Response& res) {
+                   const auto auth_user = requireAuth(req, res);
+                   if (!auth_user.has_value()) {
+                     return;
+                   }
+                   if (!hasRole(*auth_user, {"admin"})) {
+                     pos::jsonResponse(res, 403, {{"error", "Admin role required."}});
+                     return;
+                   }
+
+                   const auto payload = pos::parseJsonBody(req, res, "Invalid product payload");
+                   if (!payload.has_value()) {
+                     return;
+                   }
+
+                   try {
+                     if (req.matches.size() < 2) {
+                       pos::jsonResponse(res, 400, {{"error", "Invalid product route."}});
+                       return;
+                     }
+
+                     const int product_id = std::stoi(std::string(req.matches[1]));
+
+                     if (!payload->contains("name") || !payload->contains("price_cents") ||
+                         !payload->contains("stock_quantity")) {
+                       pos::jsonResponse(res, 400,
+                                         {{"error", "name, price_cents, and stock_quantity are required."}});
+                       return;
+                     }
+
+                     const std::string name = (*payload)["name"].get<std::string>();
+                     if (name.empty() || name.size() > 120) {
+                       throw std::runtime_error("name must be between 1 and 120 characters.");
+                     }
+
+                     const int price_cents =
+                         parseIntStrict((*payload)["price_cents"], "price_cents");
+                     if (price_cents < 1 || price_cents > 100000000) {
+                       throw std::runtime_error("price_cents must be between 1 and 100000000.");
+                     }
+
+                     const int stock_quantity =
+                         parseIntStrict((*payload)["stock_quantity"], "stock_quantity");
+                     if (stock_quantity < 0 || stock_quantity > 1000000) {
+                       throw std::runtime_error("stock_quantity must be between 0 and 1000000.");
+                     }
+
+                     const bool updated =
+                         db.updateProduct(product_id, name, price_cents, stock_quantity,
+                                          auth_user->user_id);
+                     if (!updated) {
+                       pos::jsonResponse(res, 404, {{"error", "Product not found."}});
+                       return;
+                     }
+
+                     pos::jsonResponse(res, 200, {{"message", "Product updated."}});
+                   } catch (const std::runtime_error& ex) {
+                     pos::jsonResponse(res, 400, {{"error", ex.what()}});
+                   }
+                 });
+
     server.Post("/api/sales", [&](const httplib::Request& req, httplib::Response& res) {
       const auto auth_user = requireAuth(req, res);
       if (!auth_user.has_value()) {

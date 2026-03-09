@@ -90,6 +90,16 @@ export async function updateProductStock(productId: number, stockQuantity: numbe
   });
 }
 
+export async function updateProduct(
+  productId: number,
+  input: { name: string; price_cents: number; stock_quantity: number },
+): Promise<void> {
+  await request(`/api/products/${productId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+}
+
 export async function createSale(input: {
   payment_method: 'cash' | 'card' | 'transfer';
   items: CartItem[];
