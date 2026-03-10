@@ -8,12 +8,15 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -954,11 +957,27 @@ int main() {
     // --- Static files: serve uploaded images ---
     server.set_mount_point("/uploads", "/app/uploads");
 
+    // Background thread: clean up expired sessions every 15 minutes
+    std::atomic<bool> running{true};
+    std::thread cleanup_thread([&db, &running]() {
+      while (running.load()) {
+        try { db.cleanupExpiredSessions(); } catch (...) { /* log silently */ }
+        for (int i = 0; i < 900 && running.load(); ++i) {
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+      }
+    });
+
     std::cout << "POS backend listening on " << cfg.bind_address << ':' << cfg.listen_port << std::endl;
 
     if (!server.listen(cfg.bind_address, cfg.listen_port)) {
+      running.store(false);
+      if (cleanup_thread.joinable()) cleanup_thread.join();
       throw std::runtime_error("Failed to start HTTP server.");
     }
+
+    running.store(false);
+    if (cleanup_thread.joinable()) cleanup_thread.join();
 
     return EXIT_SUCCESS;
   } catch (const std::exception& ex) {

@@ -11,18 +11,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY backend /app/backend
-
+COPY backend/CMakeLists.txt /app/backend/CMakeLists.txt
 WORKDIR /app/backend
+# Pre-fetch dependencies so they are cached
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release 2>/dev/null || true
+
+COPY backend /app/backend
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  && cmake --build build --config Release --parallel
+  && cmake --build build --config Release --parallel $(nproc)
 
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+  libpq5 \
   libpqxx-dev \
   libssl3 \
   ca-certificates \
+  curl \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

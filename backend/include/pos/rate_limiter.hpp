@@ -22,6 +22,7 @@ class RateLimiter {
 
   std::unordered_map<std::string, std::deque<Clock::time_point>> requests_;
   std::mutex mutex_;
+  int cleanup_counter_ = 0;
 };
 
 }  // namespace pos

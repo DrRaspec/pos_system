@@ -45,7 +45,7 @@ bool handleCorsPreflight(const httplib::Request& req,
   }
 
   applyCors(req, res, allowed_origin);
-  res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.set_header("Access-Control-Max-Age", "600");
   res.status = 204;

@@ -1,10 +1,14 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace pos {
+
+// Forward declaration; defined in database.cpp
+class ConnectionPool;
 
 struct UserRecord {
   int id;
@@ -164,7 +168,7 @@ struct SaleCreateInput {
 
 class Database {
  public:
-  explicit Database(std::string connection_string);
+  explicit Database(std::string connection_string, int pool_size = 8);
 
   void verifyConnectivity() const;
 
@@ -174,6 +178,7 @@ class Database {
   void createSession(int user_id, const std::string& token_hash, int session_ttl_minutes,
                      const std::string& client_ip, const std::string& user_agent) const;
   void revokeSession(const std::string& token_hash) const;
+  void cleanupExpiredSessions() const;
   bool userExists(const std::string& username) const;
   void createUser(const std::string& username, const std::string& password_hash,
                   const std::string& password_salt, int password_iterations,
@@ -248,6 +253,7 @@ class Database {
 
  private:
   std::string connection_string_;
+  mutable std::shared_ptr<ConnectionPool> pool_;
 };
 
 }  // namespace pos

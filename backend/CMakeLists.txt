@@ -48,4 +48,5 @@ target_compile_options(pos_backend PRIVATE
   -Wextra
   -Wpedantic
   -Wconversion
+  $<$<CONFIG:Release>:-O2 -DNDEBUG>
 )
