@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Docker (Linux build)",
+            "includePath": [
+                "${workspaceFolder}/backend/include"
+            ],
+            "defines": [],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerPath": "",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/backend/include"
+                ]
+            }
+        }
+    ],
+    "version": 4
+}
